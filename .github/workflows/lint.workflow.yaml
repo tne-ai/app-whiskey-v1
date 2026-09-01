@@ -1,0 +1,126 @@
+---
+# https://docs.github.com/en/actions/guides/building-and-testing-python
+name: Python and Pre-commit
+
+# yamllint disable-line rule:truthy
+on:
+  push:
+    branches:
+      - main
+      - master
+      - rich-*
+    # Release tags run the full workflow (incl. the bats unit suite) regardless
+    # of paths — a version bump must be validated end to end (r-cto-dev91).
+    tags:
+      - "v*"
+    paths:
+      - "**/*.py"
+      - "python/**"
+      - "**/requirements*.txt"
+      - "**/*.sh"
+      - "**/*.yaml"
+      - "**/*.yml"
+      - "**/*.md"
+  pull_request:
+    paths:
+      - "**/*.py"
+      - "python/**"
+      - "**/requirements*.txt"
+      - "**/*.sh"
+      - "**/*.yaml"
+      - "**/*.yml"
+      - "**/*.md"
+  workflow_dispatch:
+
+jobs:
+  # Runner selection: public repos get free GitHub runners (ubuntu-latest).
+  # Private repos default to ubuntu-latest but can override with the
+  # RUNNER_LABEL repo/org variable (e.g. blacksmith-4vcpu-ubuntu-2404).
+  # Blacksmith requires a login at useblacksmith.com and gives 3000 free min/mo.
+  python:
+    runs-on: ${{ github.event.repository.visibility == 'public' && 'ubuntu-latest' || vars.RUNNER_LABEL || 'ubuntu-latest' }}
+    steps:
+      - name: Checkout action
+        uses: actions/checkout@v5
+        with:
+          lfs: true
+          # token: '{{ secrets.GITHUB_PAT }}'
+          # submodules: recursive
+      - name: Setup python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: Display Python version
+        run: python --version
+      - name: Cache pip
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+            ${{ runner.os }}-
+      - name: Install python dependencies
+        run: |
+          python -m pip install --upgrade pip && \
+          if [ -f python/requirements.txt ]; then pip install -r python/requirements.txt; fi
+
+  pre-commit:
+    runs-on: ${{ github.event.repository.visibility == 'public' && 'ubuntu-latest' || vars.RUNNER_LABEL || 'ubuntu-latest' }}
+    steps:
+      - name: Checkout action
+        uses: actions/checkout@v5
+        with:
+          lfs: true
+          fetch-depth: 0
+          # submodules should be tested one at a time
+          # submodules: recursive
+      - name: Setup python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: Install node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+      # markdownlint-cli2 pre-commit hook self-installs; no npm global needed
+      - name: Enable Homebrew
+        uses: Homebrew/actions/setup-homebrew@master
+      - name: Install hadolint and shellcheck
+        uses: tecolicom/actions-use-homebrew-tools@v1
+        with:
+          tools: hadolint shellcheck
+
+      # tj-actions/changed-files gives us the exact file list so pre-commit
+      # only lints what changed — faster and avoids the --from-ref shallow-clone issue
+      - name: Get changed files
+        id: changed
+        uses: tj-actions/changed-files@v47
+        with:
+          separator: " "
+      - name: Run Pre-commit on changed files
+        if: steps.changed.outputs.all_changed_files != ''
+        uses: pre-commit/action@v3.0.1
+        with:
+          extra_args: --files ${{ steps.changed.outputs.all_changed_files }}
+
+  # Behavioral shell tests (per r-cto-dev91: static shellcheck runs in pre-commit,
+  # behavioral bats here). Guarded — skips silently in repos with no tests/*.bats,
+  # so this shared workflow is safe fleet-wide. Runs on PRs/pushes AND release
+  # tags (see the `tags: v*` trigger above) so a version bump is validated.
+  bats:
+    runs-on: ${{ github.event.repository.visibility == 'public' && 'ubuntu-latest' || vars.RUNNER_LABEL || 'ubuntu-latest' }}
+    steps:
+      - name: Checkout action
+        uses: actions/checkout@v5
+        with:
+          lfs: true
+      - name: Install bats
+        run: sudo apt-get update && sudo apt-get install -y bats
+      - name: Run bats unit tests (guarded — skip if none)
+        run: |
+          if ls tests/*.bats >/dev/null 2>&1; then
+            make test
+          else
+            echo "no tests/*.bats in this repo — skipping bats job"
+          fi
